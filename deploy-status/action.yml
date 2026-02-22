@@ -1,0 +1,110 @@
+name: 'Deploy Status'
+description: 'Creates or updates GitHub deployment statuses for tracking deployment progress'
+author: 'custom-actions'
+
+branding:
+  icon: 'cloud'
+  color: 'green'
+
+inputs:
+  token:
+    description: 'GitHub token with deployments permission'
+    required: true
+  environment:
+    description: 'Name of the deployment environment (e.g., production, staging)'
+    required: true
+  state:
+    description: 'Deployment state: pending, success, failure, error, or inactive'
+    required: true
+  description:
+    description: 'Short description of the deployment status'
+    required: false
+    default: ''
+  environment-url:
+    description: 'URL of the deployed environment'
+    required: false
+    default: ''
+  log-url:
+    description: 'URL to deployment logs'
+    required: false
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Create deployment and set status
+      uses: actions/github-script@v7
+      with:
+        github-token: ${{ inputs.token }}
+        script: |
+          const { owner, repo } = context.repo;
+          const environment = '${{ inputs.environment }}';
+          const state = '${{ inputs.state }}';
+          const description = '${{ inputs.description }}' || `Deployment ${state}`;
+          const environmentUrl = '${{ inputs.environment-url }}';
+          const logUrl = '${{ inputs.log-url }}';
+
+          // Validate state
+          const validStates = ['pending', 'success', 'failure', 'error', 'inactive'];
+          if (!validStates.includes(state)) {
+            core.setFailed(`Invalid state "${state}". Must be one of: ${validStates.join(', ')}`);
+            return;
+          }
+
+          // Find existing deployment for this environment and ref, or create a new one
+          let deploymentId;
+          const ref = context.sha || context.ref;
+
+          const deployments = await github.rest.repos.listDeployments({
+            owner,
+            repo,
+            environment,
+            ref,
+            per_page: 1,
+          });
+
+          if (deployments.data.length > 0) {
+            deploymentId = deployments.data[0].id;
+            core.info(`Found existing deployment: ${deploymentId}`);
+          } else {
+            const deployment = await github.rest.repos.createDeployment({
+              owner,
+              repo,
+              ref,
+              environment,
+              auto_merge: false,
+              required_contexts: [],
+              description: description,
+              transient_environment: environment !== 'production',
+            });
+
+            if (deployment.status === 202) {
+              core.setFailed('Deployment conflict: required contexts are pending');
+              return;
+            }
+
+            deploymentId = deployment.data.id;
+            core.info(`Created new deployment: ${deploymentId}`);
+          }
+
+          // Create deployment status
+          const statusParams = {
+            owner,
+            repo,
+            deployment_id: deploymentId,
+            state,
+            description,
+          };
+
+          if (environmentUrl) {
+            statusParams.environment_url = environmentUrl;
+          }
+
+          if (logUrl) {
+            statusParams.log_url = logUrl;
+          } else {
+            statusParams.log_url = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+          }
+
+          await github.rest.repos.createDeploymentStatus(statusParams);
+          core.info(`Deployment status set to "${state}" for environment "${environment}"`);

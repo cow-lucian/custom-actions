@@ -1,0 +1,35 @@
+name: 'Security Scanner'
+description: 'Docker container action that performs security vulnerability scanning using Trivy'
+author: 'custom-actions'
+
+branding:
+  icon: 'shield'
+  color: 'red'
+
+inputs:
+  scan-path:
+    description: 'Path to the directory or file to scan'
+    required: false
+    default: '.'
+  severity-threshold:
+    description: 'Minimum severity level to report (UNKNOWN, LOW, MEDIUM, HIGH, CRITICAL)'
+    required: false
+    default: 'HIGH'
+  output-format:
+    description: 'Output format for the scan report (table, json, sarif)'
+    required: false
+    default: 'table'
+
+outputs:
+  vulnerabilities-count:
+    description: 'Total number of vulnerabilities found at or above the severity threshold'
+  report-path:
+    description: 'Path to the generated scan report file'
+
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
+  args:
+    - ${{ inputs.scan-path }}
+    - ${{ inputs.severity-threshold }}
+    - ${{ inputs.output-format }}

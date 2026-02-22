@@ -1,0 +1,28 @@
+name: 'Auto Assign Reviewers'
+description: 'Automatically assigns pull request reviewers based on changed files using a CODEOWNERS-like configuration'
+author: 'custom-actions'
+
+branding:
+  icon: 'users'
+  color: 'blue'
+
+inputs:
+  token:
+    description: 'GitHub token with pull-requests write permission'
+    required: true
+  config-path:
+    description: 'Path to the reviewers configuration YAML file relative to the repository root'
+    required: false
+    default: '.github/reviewers.yml'
+  max-reviewers:
+    description: 'Maximum number of reviewers to assign per PR'
+    required: false
+    default: '2'
+
+outputs:
+  assigned-reviewers:
+    description: 'Comma-separated list of reviewers that were assigned'
+
+runs:
+  using: 'node20'
+  main: 'index.js'

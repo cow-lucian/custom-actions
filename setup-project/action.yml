@@ -1,0 +1,90 @@
+name: 'Setup Project'
+description: 'Composite action that sets up a project environment with checkout, Node.js setup, dependency installation, and caching'
+author: 'custom-actions'
+
+branding:
+  icon: 'package'
+  color: 'blue'
+
+inputs:
+  node-version:
+    description: 'Node.js version to use'
+    required: false
+    default: '20'
+  package-manager:
+    description: 'Package manager to use (npm, yarn, pnpm)'
+    required: false
+    default: 'npm'
+  working-directory:
+    description: 'Working directory for the project'
+    required: false
+    default: '.'
+
+outputs:
+  cache-hit:
+    description: 'Whether the dependency cache was hit'
+    value: ${{ steps.setup-node.outputs.cache-hit }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Detect lockfile
+      id: detect-lockfile
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        if [ -f "pnpm-lock.yaml" ]; then
+          echo "lockfile=pnpm-lock.yaml" >> "$GITHUB_OUTPUT"
+          echo "manager=pnpm" >> "$GITHUB_OUTPUT"
+        elif [ -f "yarn.lock" ]; then
+          echo "lockfile=yarn.lock" >> "$GITHUB_OUTPUT"
+          echo "manager=yarn" >> "$GITHUB_OUTPUT"
+        elif [ -f "package-lock.json" ]; then
+          echo "lockfile=package-lock.json" >> "$GITHUB_OUTPUT"
+          echo "manager=npm" >> "$GITHUB_OUTPUT"
+        else
+          echo "lockfile=" >> "$GITHUB_OUTPUT"
+          echo "manager=${{ inputs.package-manager }}" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Setup pnpm
+      if: steps.detect-lockfile.outputs.manager == 'pnpm' || inputs.package-manager == 'pnpm'
+      uses: pnpm/action-setup@v2
+      with:
+        version: latest
+
+    - name: Setup Node.js
+      id: setup-node
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: ${{ steps.detect-lockfile.outputs.manager }}
+        cache-dependency-path: ${{ inputs.working-directory }}/${{ steps.detect-lockfile.outputs.lockfile }}
+
+    - name: Install dependencies
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        MANAGER="${{ steps.detect-lockfile.outputs.manager }}"
+        case "$MANAGER" in
+          pnpm)
+            pnpm install --frozen-lockfile
+            ;;
+          yarn)
+            yarn install --frozen-lockfile
+            ;;
+          npm)
+            if [ -f "package-lock.json" ]; then
+              npm ci
+            else
+              npm install
+            fi
+            ;;
+          *)
+            echo "::error::Unsupported package manager: $MANAGER"
+            exit 1
+            ;;
+        esac

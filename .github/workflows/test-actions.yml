@@ -1,0 +1,330 @@
+name: Test Custom Actions
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  deployments: write
+
+jobs:
+  test-setup-project:
+    name: Test setup-project
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ['18', '20', '22']
+    steps:
+      - name: Checkout custom actions
+        uses: actions/checkout@v4
+
+      - name: Create test package.json
+        run: |
+          mkdir -p /tmp/test-project
+          cat > /tmp/test-project/package.json << 'HEREDOC'
+          {
+            "name": "test-project",
+            "version": "1.0.0",
+            "dependencies": {}
+          }
+          HEREDOC
+          cd /tmp/test-project && npm install --package-lock-only
+
+      - name: Run setup-project action
+        id: setup
+        uses: ./setup-project
+        with:
+          node-version: ${{ matrix.node-version }}
+          package-manager: 'npm'
+          working-directory: '/tmp/test-project'
+
+      - name: Verify Node.js version
+        run: |
+          ACTUAL_VERSION=$(node --version)
+          echo "Node.js version: $ACTUAL_VERSION"
+          echo "Expected major version: ${{ matrix.node-version }}"
+          echo "$ACTUAL_VERSION" | grep -q "^v${{ matrix.node-version }}\."
+
+      - name: Verify cache output exists
+        run: |
+          echo "Cache hit: ${{ steps.setup.outputs.cache-hit }}"
+
+  test-cache-restore-save:
+    name: Test cache-restore-save
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout custom actions
+        uses: actions/checkout@v4
+
+      - name: Create test data
+        run: |
+          mkdir -p /tmp/cache-test
+          echo "test-data-$(date +%s)" > /tmp/cache-test/data.txt
+
+      - name: Test cache action
+        id: cache
+        uses: ./cache-restore-save
+        with:
+          path: /tmp/cache-test
+          key: test-cache-${{ github.sha }}
+          restore-keys: |
+            test-cache-
+
+      - name: Verify cache outputs
+        run: |
+          echo "Cache hit: ${{ steps.cache.outputs.cache-hit }}"
+          echo "Matched key: ${{ steps.cache.outputs.cache-matched-key }}"
+
+  test-pr-comment:
+    name: Test pr-comment
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout custom actions
+        uses: actions/checkout@v4
+
+      - name: Test creating a PR comment
+        id: comment-create
+        uses: ./pr-comment
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          message: |
+            ## Test Comment
+            This is a test comment from the `pr-comment` action.
+
+            - Run: `${{ github.run_id }}`
+            - SHA: `${{ github.sha }}`
+          header: 'test-pr-comment'
+
+      - name: Verify comment was created
+        run: |
+          echo "Comment ID: ${{ steps.comment-create.outputs.comment-id }}"
+          test -n "${{ steps.comment-create.outputs.comment-id }}"
+
+      - name: Test updating the PR comment
+        id: comment-update
+        uses: ./pr-comment
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          message: |
+            ## Test Comment (Updated)
+            This comment was updated by the `pr-comment` action.
+
+            - Run: `${{ github.run_id }}`
+            - SHA: `${{ github.sha }}`
+            - Updated: `true`
+          header: 'test-pr-comment'
+
+      - name: Verify same comment was updated
+        run: |
+          echo "Original ID: ${{ steps.comment-create.outputs.comment-id }}"
+          echo "Updated ID:  ${{ steps.comment-update.outputs.comment-id }}"
+          test "${{ steps.comment-create.outputs.comment-id }}" = "${{ steps.comment-update.outputs.comment-id }}"
+
+  test-deploy-status:
+    name: Test deploy-status
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout custom actions
+        uses: actions/checkout@v4
+
+      - name: Set deployment pending
+        uses: ./deploy-status
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          environment: 'test-environment'
+          state: 'pending'
+          description: 'Deployment is starting...'
+
+      - name: Simulate deployment work
+        run: sleep 5
+
+      - name: Set deployment success
+        uses: ./deploy-status
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          environment: 'test-environment'
+          state: 'success'
+          description: 'Deployment completed successfully'
+          environment-url: 'https://example.com'
+
+  test-lint-commit-messages:
+    name: Test lint-commit-messages
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout custom actions
+        uses: actions/checkout@v4
+
+      - name: Install action dependencies
+        run: npm install
+        working-directory: ./lint-commit-messages
+
+      - name: Run lint-commit-messages
+        id: lint
+        uses: ./lint-commit-messages
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          strict: 'false'
+
+      - name: Check outputs
+        run: |
+          echo "Valid: ${{ steps.lint.outputs.valid }}"
+          echo "Errors: ${{ steps.lint.outputs.errors }}"
+
+  test-auto-assign-reviewers:
+    name: Test auto-assign-reviewers
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout custom actions
+        uses: actions/checkout@v4
+
+      - name: Create test reviewers config
+        run: |
+          mkdir -p .github
+          cat > .github/reviewers.yml << 'HEREDOC'
+          reviewers:
+            - patterns:
+                - "**/*.js"
+                - "**/*.ts"
+              users:
+                - octocat
+            - patterns:
+                - "**/*.yml"
+                - "**/*.yaml"
+              users:
+                - octocat
+          defaults:
+            reviewers:
+              - octocat
+          HEREDOC
+
+      - name: Install action dependencies
+        run: npm install
+        working-directory: ./auto-assign-reviewers
+
+      - name: Run auto-assign-reviewers
+        id: assign
+        uses: ./auto-assign-reviewers
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-path: '.github/reviewers.yml'
+          max-reviewers: '2'
+        continue-on-error: true
+
+      - name: Check outputs
+        run: |
+          echo "Assigned reviewers: ${{ steps.assign.outputs.assigned-reviewers }}"
+
+  test-security-scanner:
+    name: Test security-scanner
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout custom actions
+        uses: actions/checkout@v4
+
+      - name: Create test project to scan
+        run: |
+          mkdir -p /tmp/scan-target
+          cat > /tmp/scan-target/package.json << 'HEREDOC'
+          {
+            "name": "test-scan",
+            "version": "1.0.0",
+            "dependencies": {}
+          }
+          HEREDOC
+
+      - name: Run security scanner
+        id: scan
+        uses: ./security-scanner
+        with:
+          scan-path: '/tmp/scan-target'
+          severity-threshold: 'HIGH'
+          output-format: 'table'
+
+      - name: Check outputs
+        run: |
+          echo "Vulnerabilities count: ${{ steps.scan.outputs.vulnerabilities-count }}"
+          echo "Report path: ${{ steps.scan.outputs.report-path }}"
+
+  test-terraform-plan-comment:
+    name: Test terraform-plan-comment
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout custom actions
+        uses: actions/checkout@v4
+
+      - name: Create test Terraform config
+        run: |
+          mkdir -p /tmp/tf-test
+          cat > /tmp/tf-test/main.tf << 'HEREDOC'
+          terraform {
+            required_version = ">= 1.0"
+          }
+
+          resource "null_resource" "test" {
+            triggers = {
+              always_run = timestamp()
+            }
+          }
+          HEREDOC
+
+      - name: Run terraform-plan-comment
+        id: tf-plan
+        uses: ./terraform-plan-comment
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          working-directory: '/tmp/tf-test'
+          terraform-version: '1.6'
+        continue-on-error: true
+
+      - name: Check outputs
+        run: |
+          echo "Plan exit code: ${{ steps.tf-plan.outputs.plan-exitcode }}"
+          echo "Has changes: ${{ steps.tf-plan.outputs.has-changes }}"
+
+  all-tests-pass:
+    name: All Tests Pass
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - test-setup-project
+      - test-cache-restore-save
+      - test-pr-comment
+      - test-deploy-status
+      - test-lint-commit-messages
+      - test-auto-assign-reviewers
+      - test-security-scanner
+      - test-terraform-plan-comment
+    steps:
+      - name: Check test results
+        run: |
+          echo "Setup project: ${{ needs.test-setup-project.result }}"
+          echo "Cache: ${{ needs.test-cache-restore-save.result }}"
+          echo "PR Comment: ${{ needs.test-pr-comment.result }}"
+          echo "Deploy Status: ${{ needs.test-deploy-status.result }}"
+          echo "Lint Commits: ${{ needs.test-lint-commit-messages.result }}"
+          echo "Auto Assign: ${{ needs.test-auto-assign-reviewers.result }}"
+          echo "Security Scanner: ${{ needs.test-security-scanner.result }}"
+          echo "Terraform Plan: ${{ needs.test-terraform-plan-comment.result }}"
+
+          # Fail if any required test failed (skip skipped jobs)
+          for result in \
+            "${{ needs.test-setup-project.result }}" \
+            "${{ needs.test-cache-restore-save.result }}" \
+            "${{ needs.test-security-scanner.result }}"; do
+            if [ "$result" = "failure" ]; then
+              echo "::error::One or more required tests failed"
+              exit 1
+            fi
+          done
+
+          echo "All required tests passed!"

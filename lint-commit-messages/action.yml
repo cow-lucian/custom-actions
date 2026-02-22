@@ -1,0 +1,30 @@
+name: 'Lint Commit Messages'
+description: 'Validates that commit messages in a pull request follow the Conventional Commits specification'
+author: 'custom-actions'
+
+branding:
+  icon: 'check-circle'
+  color: 'orange'
+
+inputs:
+  token:
+    description: 'GitHub token for accessing the pull request commits'
+    required: true
+  base-ref:
+    description: 'Base branch reference to compare against'
+    required: false
+    default: 'main'
+  strict:
+    description: 'When true, fail the action on invalid commit messages. When false, only warn.'
+    required: false
+    default: 'true'
+
+outputs:
+  valid:
+    description: 'Whether all commit messages are valid (true/false)'
+  errors:
+    description: 'JSON array of error objects with sha, message, and error details'
+
+runs:
+  using: 'node20'
+  main: 'index.js'

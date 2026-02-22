@@ -1,0 +1,61 @@
+name: 'Cache Restore & Save'
+description: 'Smart caching action with multiple fallback restore keys for flexible cache matching strategies'
+author: 'custom-actions'
+
+branding:
+  icon: 'database'
+  color: 'yellow'
+
+inputs:
+  path:
+    description: 'A list of files, directories, and wildcard patterns to cache and restore (one per line)'
+    required: true
+  key:
+    description: 'Primary cache key for saving and exact-match restoring'
+    required: true
+  restore-keys:
+    description: 'Ordered list of fallback cache key prefixes for partial matching (one per line)'
+    required: false
+    default: ''
+  upload-chunk-size:
+    description: 'Size in bytes for each chunk during cache upload (e.g., 33554432 for 32MB)'
+    required: false
+    default: ''
+
+outputs:
+  cache-hit:
+    description: 'Boolean indicating whether an exact cache key match was found'
+    value: ${{ steps.restore-cache.outputs.cache-hit }}
+  cache-matched-key:
+    description: 'The cache key that was actually matched (may differ from primary key if a fallback was used)'
+    value: ${{ steps.restore-cache.outputs.cache-matched-key }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Restore cache
+      id: restore-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ inputs.path }}
+        key: ${{ inputs.key }}
+        restore-keys: ${{ inputs.restore-keys }}
+
+    - name: Report cache status
+      shell: bash
+      run: |
+        if [ "${{ steps.restore-cache.outputs.cache-hit }}" == "true" ]; then
+          echo "::notice::Cache hit with exact key: ${{ inputs.key }}"
+        elif [ -n "${{ steps.restore-cache.outputs.cache-matched-key }}" ]; then
+          echo "::notice::Cache restored from fallback key: ${{ steps.restore-cache.outputs.cache-matched-key }}"
+        else
+          echo "::notice::No cache found. A fresh cache will be saved after the workflow."
+        fi
+
+    - name: Save cache
+      if: steps.restore-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ inputs.path }}
+        key: ${{ inputs.key }}
+        upload-chunk-size: ${{ inputs.upload-chunk-size }}
