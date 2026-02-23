@@ -1,0 +1,338 @@
+# =============================================================================
+# OAuth App Setup & Token Management Action
+# =============================================================================
+# SCHOLAR NOTE:
+#   OAuth Apps authenticate on behalf of a USER using OAuth 2.0 flow.
+#   This is different from GitHub Apps which act as a machine identity.
+#
+# OAUTH APP vs GITHUB APP:
+#   | Feature | OAuth App | GitHub App |
+#   |---------|-----------|------------|
+#   | Identity | Acts as a user | Acts as an app/bot |
+#   | Auth flow | OAuth 2.0 (browser) | JWT + installation token |
+#   | Token type | User access token | Installation token |
+#   | Token expiry | Until revoked | 1 hour |
+#   | Scope model | OAuth scopes (broad) | Fine-grained permissions |
+#   | Rate limit | User's limit (5000/hr) | Per-installation (5000/hr) |
+#   | Webhook | Optional | Built-in |
+#   | Marketplace | No | Yes |
+#   | Bot user | No | Yes (app[bot]) |
+#   | Best for | User-facing integrations | CI/CD, automation |
+#
+# OAUTH 2.0 FLOW (Web Application Flow):
+#   1. Redirect user to: https://github.com/login/oauth/authorize
+#      with client_id, redirect_uri, scope, state
+#   2. User authorizes the app on GitHub
+#   3. GitHub redirects back with a temporary `code`
+#   4. Exchange `code` for an access token via POST to:
+#      https://github.com/login/oauth/access_token
+#   5. Use the access token for API calls
+#
+# DEVICE FLOW (for CLI/headless):
+#   1. POST to https://github.com/login/oauth/device/code
+#   2. Display user_code and verification_uri to user
+#   3. Poll https://github.com/login/oauth/access_token until authorized
+#
+# OAUTH SCOPES (commonly used):
+#   repo              Full control of private repositories
+#   repo:status       Access commit status
+#   repo_deployment   Access deployment status
+#   public_repo       Access public repositories only
+#   repo:invite       Access repository invitations
+#   delete_repo       Delete repositories
+#   admin:org         Full control of orgs and teams
+#   write:org         Read and write org and team membership
+#   read:org          Read org and team membership
+#   admin:public_key  Full control of user public keys
+#   write:public_key  Write user public keys
+#   read:public_key   Read user public keys
+#   admin:repo_hook   Full control of repository hooks
+#   write:repo_hook   Write repository hooks
+#   read:repo_hook    Read repository hooks
+#   admin:org_hook    Full control of organization hooks
+#   gist              Create gists
+#   notifications     Access notifications
+#   user              Read/write access to profile info
+#   user:email        Access user email addresses
+#   user:follow       Follow and unfollow users
+#   project           Read/write access to projects
+#   read:project      Read access to projects
+#   workflow          Update GitHub Action workflow files
+#   admin:gpg_key     Full control of GPG keys
+#   write:gpg_key     Write GPG keys
+#   read:gpg_key      Read GPG keys
+#   packages          Manage GitHub Packages
+#   write:packages    Write packages
+#   read:packages     Read packages
+#   delete:packages   Delete packages
+#   codespace         Manage codespaces
+#
+# SETUP GUIDE:
+#   1. Go to Settings > Developer settings > OAuth Apps > New OAuth App
+#   2. Set Application name, Homepage URL, Authorization callback URL
+#   3. Note the Client ID
+#   4. Generate a Client Secret
+#   5. Store as repository secrets:
+#      - OAUTH_CLIENT_ID
+#      - OAUTH_CLIENT_SECRET
+# =============================================================================
+
+name: 'OAuth App Setup Guide'
+description: >
+  Comprehensive reference action for setting up and managing GitHub OAuth Apps.
+  Includes OAuth 2.0 flow documentation, scope reference, token validation,
+  and comparison with GitHub Apps for choosing the right authentication method.
+author: 'custom-actions'
+
+branding:
+  icon: 'lock'
+  color: 'orange'
+
+inputs:
+  client-id:
+    description: 'OAuth App Client ID'
+    required: true
+  client-secret:
+    description: 'OAuth App Client Secret'
+    required: true
+  access-token:
+    description: >
+      An existing OAuth access token to validate. If provided, the action
+      will check if the token is still valid and report its scopes.
+    required: false
+    default: ''
+  operation:
+    description: >
+      Operation to perform: 'validate' to check an existing token,
+      'info' to display OAuth setup documentation
+    required: false
+    default: 'info'
+
+outputs:
+  token-valid:
+    description: 'Whether the provided access token is valid (true/false)'
+    value: ${{ steps.validate.outputs.valid }}
+  token-scopes:
+    description: 'Comma-separated list of scopes the token has'
+    value: ${{ steps.validate.outputs.scopes }}
+  token-user:
+    description: 'The GitHub username associated with the token'
+    value: ${{ steps.validate.outputs.user }}
+  rate-limit-remaining:
+    description: 'Remaining API rate limit for this token'
+    value: ${{ steps.validate.outputs.rate-limit-remaining }}
+
+runs:
+  using: 'composite'
+  steps:
+    # -------------------------------------------------------------------------
+    # Validate existing OAuth token
+    # -------------------------------------------------------------------------
+    - name: Validate OAuth token
+      id: validate
+      if: inputs.access-token != ''
+      shell: bash
+      run: |
+        echo "=== Validating OAuth Token ==="
+
+        # Check token validity by calling the API
+        HTTP_CODE=$(curl -s -o /tmp/oauth-response.json -w "%{http_code}" \
+          -H "Authorization: token ${{ inputs.access-token }}" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/user")
+
+        if [ "$HTTP_CODE" = "200" ]; then
+          echo "valid=true" >> "$GITHUB_OUTPUT"
+
+          USER=$(jq -r '.login' /tmp/oauth-response.json)
+          echo "user=${USER}" >> "$GITHUB_OUTPUT"
+          echo "Token is valid for user: ${USER}"
+
+          # Get scopes from response headers
+          SCOPES=$(curl -sI \
+            -H "Authorization: token ${{ inputs.access-token }}" \
+            "https://api.github.com/user" | grep -i "x-oauth-scopes:" | cut -d: -f2- | tr -d ' \r')
+          echo "scopes=${SCOPES}" >> "$GITHUB_OUTPUT"
+          echo "Token scopes: ${SCOPES}"
+
+          # Get rate limit info
+          RATE_RESPONSE=$(curl -sf \
+            -H "Authorization: token ${{ inputs.access-token }}" \
+            "https://api.github.com/rate_limit")
+          REMAINING=$(echo "$RATE_RESPONSE" | jq -r '.rate.remaining')
+          echo "rate-limit-remaining=${REMAINING}" >> "$GITHUB_OUTPUT"
+          echo "Rate limit remaining: ${REMAINING}"
+        else
+          echo "valid=false" >> "$GITHUB_OUTPUT"
+          echo "scopes=" >> "$GITHUB_OUTPUT"
+          echo "user=" >> "$GITHUB_OUTPUT"
+          echo "rate-limit-remaining=0" >> "$GITHUB_OUTPUT"
+          echo "::warning::OAuth token is invalid or expired (HTTP ${HTTP_CODE})"
+        fi
+
+        rm -f /tmp/oauth-response.json
+
+    # -------------------------------------------------------------------------
+    # Check OAuth App details via Client Credentials
+    # -------------------------------------------------------------------------
+    - name: Verify OAuth App
+      id: verify-app
+      shell: bash
+      run: |
+        echo "=== Verifying OAuth App ==="
+
+        # Check if the OAuth App exists (using basic auth with client credentials)
+        HTTP_CODE=$(curl -s -o /tmp/app-response.json -w "%{http_code}" \
+          -u "${{ inputs.client-id }}:${{ inputs.client-secret }}" \
+          "https://api.github.com/applications/${{ inputs.client-id }}")
+
+        if [ "$HTTP_CODE" = "200" ]; then
+          APP_NAME=$(jq -r '.name' /tmp/app-response.json)
+          echo "OAuth App verified: ${APP_NAME}"
+          echo "app-name=${APP_NAME}" >> "$GITHUB_OUTPUT"
+        else
+          echo "::warning::Could not verify OAuth App (HTTP ${HTTP_CODE})"
+          echo "::warning::This is normal if you haven't created the OAuth App yet"
+        fi
+
+        rm -f /tmp/app-response.json
+
+    # -------------------------------------------------------------------------
+    # Generate comprehensive documentation
+    # -------------------------------------------------------------------------
+    - name: OAuth Setup Documentation
+      shell: bash
+      run: |
+        cat >> "$GITHUB_STEP_SUMMARY" << 'EOF'
+        # OAuth App Setup Guide
+
+        ## Step 1: Create the OAuth App
+
+        1. Go to **Settings** > **Developer settings** > **OAuth Apps**
+        2. Click **New OAuth App**
+        3. Fill in:
+           - **Application name**: Your app name
+           - **Homepage URL**: Your app's website
+           - **Authorization callback URL**: Where users redirect after auth
+             - For web apps: `https://yourapp.com/auth/callback`
+             - For local dev: `http://localhost:3000/auth/callback`
+        4. Click **Register application**
+
+        ## Step 2: Configure Credentials
+
+        After creation, you'll get:
+        - **Client ID**: Public identifier (safe to expose)
+        - **Client Secret**: Private key (NEVER expose)
+
+        Store as secrets:
+        ```bash
+        gh secret set OAUTH_CLIENT_ID --body "Iv1.abc123..."
+        gh secret set OAUTH_CLIENT_SECRET --body "secret123..."
+        ```
+
+        ## Step 3: Implement the OAuth Flow
+
+        ### Web Application Flow
+        ```
+        1. User clicks "Login with GitHub"
+               |
+               v
+        2. Redirect to GitHub:
+           GET https://github.com/login/oauth/authorize
+             ?client_id=YOUR_CLIENT_ID
+             &redirect_uri=https://yourapp.com/callback
+             &scope=repo,user:email
+             &state=RANDOM_STRING
+               |
+               v
+        3. User authorizes on GitHub
+               |
+               v
+        4. GitHub redirects to your callback:
+           GET https://yourapp.com/callback?code=TEMP_CODE&state=RANDOM_STRING
+               |
+               v
+        5. Exchange code for token:
+           POST https://github.com/login/oauth/access_token
+             client_id=YOUR_CLIENT_ID
+             client_secret=YOUR_CLIENT_SECRET
+             code=TEMP_CODE
+               |
+               v
+        6. Receive access_token in response
+               |
+               v
+        7. Use token for API calls:
+           GET https://api.github.com/user
+           Authorization: token ACCESS_TOKEN
+        ```
+
+        ### Device Flow (CLI/Headless)
+        ```
+        1. App requests device code:
+           POST https://github.com/login/oauth/device/code
+             client_id=YOUR_CLIENT_ID
+             scope=repo
+               |
+               v
+        2. Display to user:
+           "Go to https://github.com/login/device
+            and enter code: ABCD-1234"
+               |
+               v
+        3. Poll for authorization:
+           POST https://github.com/login/oauth/access_token
+             client_id=YOUR_CLIENT_ID
+             device_code=DEVICE_CODE
+             grant_type=urn:ietf:params:oauth:grant-type:device_code
+               |
+               v
+        4. Receive access_token when user completes auth
+        ```
+
+        ## OAuth Scopes Reference
+
+        | Scope | Access Level |
+        |-------|-------------|
+        | `repo` | Full control of private repos |
+        | `public_repo` | Public repos only |
+        | `repo:status` | Commit status |
+        | `repo_deployment` | Deployment status |
+        | `admin:org` | Full org control |
+        | `write:org` | Read/write org membership |
+        | `read:org` | Read org membership |
+        | `admin:repo_hook` | Full webhook control |
+        | `user` | Read/write profile |
+        | `user:email` | Read email addresses |
+        | `workflow` | Update workflow files |
+        | `packages` | Manage GitHub Packages |
+        | `notifications` | Access notifications |
+        | `gist` | Create gists |
+
+        > **IMPORTANT:** The `workflow` scope is required to create/update
+        > files in `.github/workflows/` via the API. This is why you got
+        > the "refusing to allow an OAuth App" error without it.
+
+        ## When to Use OAuth App vs GitHub App
+
+        | Use Case | Recommended |
+        |----------|-------------|
+        | CI/CD automation | **GitHub App** |
+        | User-facing web integration | **OAuth App** |
+        | Cross-repo operations | **GitHub App** |
+        | Acting on behalf of a user | **OAuth App** |
+        | Marketplace distribution | **GitHub App** |
+        | Simple personal automation | **PAT (fine-grained)** |
+        | Webhook processing | **GitHub App** |
+
+        ## Security Best Practices
+
+        1. **Never expose Client Secret** in code or logs
+        2. **Use state parameter** to prevent CSRF attacks
+        3. **Request minimum scopes** needed
+        4. **Validate the state** parameter on callback
+        5. **Store tokens securely** (encrypted, not in localStorage)
+        6. **Implement token refresh** for long-lived sessions
+        7. **Use PKCE** (Proof Key for Code Exchange) when possible
+        8. **Set token expiry** and implement refresh flows
+        EOF

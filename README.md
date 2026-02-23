@@ -14,6 +14,85 @@ A collection of reusable GitHub Actions for common CI/CD workflows.
 | [auto-assign-reviewers](#auto-assign-reviewers) | JavaScript | Auto-assign PR reviewers based on changed files |
 | [security-scanner](#security-scanner) | Docker | Security vulnerability scanning with Trivy |
 | [terraform-plan-comment](#terraform-plan-comment) | Composite | Run Terraform plan and post results as PR comment |
+| [github-app-auth](#github-app-auth) | Composite | **GitHub App JWT auth, installation tokens, cross-repo operations** |
+| [oauth-app-setup](#oauth-app-setup) | Composite | **OAuth App setup guide, token validation, scope reference** |
+
+---
+
+## github-app-auth
+
+Authenticates as a GitHub App to generate short-lived installation tokens. Includes JWT generation, installation detection, and token scoping. Comprehensive documentation on GitHub App vs PAT vs GITHUB_TOKEN.
+
+### Inputs
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `app-id` | Yes | - | GitHub App numeric ID |
+| `private-key` | Yes | - | GitHub App private key (PEM format) |
+| `installation-id` | No | Auto-detect | Installation ID |
+| `repositories` | No | All installed | Comma-separated repo names to scope to |
+| `permissions` | No | All granted | JSON permissions object |
+
+### Outputs
+
+| Output | Description |
+|--------|-------------|
+| `token` | Installation access token (expires in 1 hour) |
+| `token-expiry` | ISO 8601 expiry timestamp |
+| `installation-id` | Installation ID used |
+
+### Usage
+
+```yaml
+- name: Generate App Token
+  id: app-token
+  uses: your-org/custom-actions/github-app-auth@main
+  with:
+    app-id: ${{ secrets.APP_ID }}
+    private-key: ${{ secrets.APP_PRIVATE_KEY }}
+    repositories: 'frontend,backend'
+
+- name: Use token for cross-repo operations
+  run: gh api repos/org/other-repo/dispatches -f event_type=deploy
+  env:
+    GH_TOKEN: ${{ steps.app-token.outputs.token }}
+```
+
+---
+
+## oauth-app-setup
+
+Comprehensive reference action for GitHub OAuth Apps. Validates existing tokens, reports scopes, and generates setup documentation including the complete OAuth 2.0 flow, all scopes, and security best practices.
+
+### Inputs
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `client-id` | Yes | - | OAuth App Client ID |
+| `client-secret` | Yes | - | OAuth App Client Secret |
+| `access-token` | No | - | Existing token to validate |
+| `operation` | No | `info` | `validate` or `info` |
+
+### Outputs
+
+| Output | Description |
+|--------|-------------|
+| `token-valid` | Whether the token is valid |
+| `token-scopes` | Comma-separated token scopes |
+| `token-user` | GitHub username for the token |
+| `rate-limit-remaining` | Remaining API rate limit |
+
+### Usage
+
+```yaml
+- name: Validate OAuth token
+  uses: your-org/custom-actions/oauth-app-setup@main
+  with:
+    client-id: ${{ secrets.OAUTH_CLIENT_ID }}
+    client-secret: ${{ secrets.OAUTH_CLIENT_SECRET }}
+    access-token: ${{ secrets.OAUTH_TOKEN }}
+    operation: validate
+```
 
 ---
 

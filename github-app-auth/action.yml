@@ -1,0 +1,232 @@
+# =============================================================================
+# GitHub App Authentication Action
+# =============================================================================
+# SCHOLAR NOTE:
+#   GitHub Apps are the RECOMMENDED authentication method for CI/CD because:
+#   1. Tokens expire in 1 hour (short-lived, secure)
+#   2. Permissions are scoped per-installation (least privilege)
+#   3. Rate limits are separate from user limits (5000 req/hr per install)
+#   4. Actions are attributed to the App, not a user
+#   5. No user account required (machine identity)
+#   6. Can be installed on specific repositories
+#
+# HOW GITHUB APP AUTH WORKS:
+#   Step 1: Create a JWT (JSON Web Token) using the App's private key
+#   Step 2: Use the JWT to request an installation access token
+#   Step 3: Use the installation token for API calls (expires in 1 hour)
+#
+# SETUP GUIDE:
+#   1. Go to Settings > Developer settings > GitHub Apps > New GitHub App
+#   2. Set the App name, homepage URL, and webhook URL (optional)
+#   3. Configure permissions (e.g., contents: read/write, issues: write)
+#   4. Generate a private key (PEM file)
+#   5. Install the App on your repository/organization
+#   6. Store the App ID and private key as repository secrets:
+#      - APP_ID: The numeric App ID (from the App's settings page)
+#      - APP_PRIVATE_KEY: The entire PEM file contents
+#
+# GITHUB APP vs PAT vs GITHUB_TOKEN:
+#   | Feature | GITHUB_TOKEN | PAT (classic) | PAT (fine-grained) | GitHub App |
+#   |---------|-------------|--------------|-------------------|------------|
+#   | Scope | Current repo | All/selected | Selected repos | Installed repos |
+#   | Expires | Job end | Manual/never | Configurable | 1 hour |
+#   | Rate limit | 1000/hr | 5000/hr | 5000/hr | 5000/hr/install |
+#   | Triggers workflows | No | Yes | Yes | Yes |
+#   | Cross-repo | No | Yes | Yes | Yes (if installed) |
+#   | User required | No | Yes | Yes | No |
+#   | Audit trail | Workflow run | User account | User account | App identity |
+# =============================================================================
+
+name: 'GitHub App Authentication'
+description: >
+  Authenticates as a GitHub App to generate short-lived installation tokens.
+  Supports cross-repository operations, workflow triggering, and fine-grained
+  permissions. Includes JWT generation and installation token management.
+author: 'custom-actions'
+
+branding:
+  icon: 'key'
+  color: 'green'
+
+inputs:
+  app-id:
+    description: >
+      The GitHub App's numeric ID. Found on the App's settings page at
+      Settings > Developer settings > GitHub Apps > Your App.
+    required: true
+  private-key:
+    description: >
+      The GitHub App's private key (PEM format). Generate from the App's
+      settings page. Store the entire PEM file contents as a secret.
+    required: true
+  installation-id:
+    description: >
+      The installation ID. If not provided, the action will auto-detect
+      the installation for the current repository.
+    required: false
+    default: ''
+  repositories:
+    description: >
+      Comma-separated list of repository names to scope the token to.
+      If empty, the token has access to all repositories where the App
+      is installed.
+    required: false
+    default: ''
+  permissions:
+    description: >
+      JSON object of permissions to request for the token. If empty,
+      all permissions granted to the App installation are used.
+      Example: '{"contents":"read","issues":"write"}'
+    required: false
+    default: ''
+
+outputs:
+  token:
+    description: 'The installation access token (expires in 1 hour)'
+    value: ${{ steps.get-token.outputs.token }}
+  token-expiry:
+    description: 'ISO 8601 timestamp when the token expires'
+    value: ${{ steps.get-token.outputs.expires-at }}
+  installation-id:
+    description: 'The installation ID that was used'
+    value: ${{ steps.get-token.outputs.installation-id }}
+
+runs:
+  using: 'composite'
+  steps:
+    # -------------------------------------------------------------------------
+    # Step 1: Generate JWT from App ID + Private Key
+    # -------------------------------------------------------------------------
+    # The JWT is used to authenticate as the App itself (not an installation).
+    # It is valid for up to 10 minutes and is used solely to obtain an
+    # installation access token.
+    #
+    # JWT Payload:
+    #   iss: App ID (issuer)
+    #   iat: Current time - 60s (issued at, with clock drift buffer)
+    #   exp: Current time + 600s (10 minute expiry)
+    # -------------------------------------------------------------------------
+    - name: Generate JWT
+      id: jwt
+      shell: bash
+      run: |
+        # Create JWT header and payload
+        HEADER=$(echo -n '{"alg":"RS256","typ":"JWT"}' | openssl base64 -e -A | tr '+/' '-_' | tr -d '=')
+
+        NOW=$(date +%s)
+        IAT=$((NOW - 60))  # 60 seconds in the past for clock drift
+        EXP=$((NOW + 600)) # 10 minutes from now
+
+        PAYLOAD=$(echo -n "{\"iss\":\"${{ inputs.app-id }}\",\"iat\":${IAT},\"exp\":${EXP}}" | openssl base64 -e -A | tr '+/' '-_' | tr -d '=')
+
+        # Sign with private key
+        SIGNATURE=$(echo -n "${HEADER}.${PAYLOAD}" | openssl dgst -sha256 -sign <(echo '${{ inputs.private-key }}') | openssl base64 -e -A | tr '+/' '-_' | tr -d '=')
+
+        JWT="${HEADER}.${PAYLOAD}.${SIGNATURE}"
+
+        # Mask the JWT in logs
+        echo "::add-mask::${JWT}"
+        echo "jwt=${JWT}" >> "$GITHUB_OUTPUT"
+
+        echo "JWT generated successfully (expires in 10 minutes)"
+
+    # -------------------------------------------------------------------------
+    # Step 2: Find the installation ID (if not provided)
+    # -------------------------------------------------------------------------
+    - name: Find installation
+      id: find-install
+      shell: bash
+      run: |
+        if [ -n "${{ inputs.installation-id }}" ]; then
+          echo "installation-id=${{ inputs.installation-id }}" >> "$GITHUB_OUTPUT"
+          echo "Using provided installation ID: ${{ inputs.installation-id }}"
+        else
+          # Auto-detect installation for the current repository
+          OWNER="${GITHUB_REPOSITORY_OWNER}"
+          REPO="${GITHUB_REPOSITORY#*/}"
+
+          RESPONSE=$(curl -sf \
+            -H "Authorization: Bearer ${{ steps.jwt.outputs.jwt }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${OWNER}/${REPO}/installation")
+
+          INSTALL_ID=$(echo "$RESPONSE" | jq -r '.id')
+
+          if [ -z "$INSTALL_ID" ] || [ "$INSTALL_ID" = "null" ]; then
+            echo "::error::Could not find App installation for ${OWNER}/${REPO}"
+            echo "::error::Ensure the GitHub App is installed on this repository"
+            exit 1
+          fi
+
+          echo "installation-id=${INSTALL_ID}" >> "$GITHUB_OUTPUT"
+          echo "Auto-detected installation ID: ${INSTALL_ID}"
+        fi
+
+    # -------------------------------------------------------------------------
+    # Step 3: Generate Installation Access Token
+    # -------------------------------------------------------------------------
+    # The installation token:
+    #   - Is scoped to the repositories where the App is installed
+    #   - Can be further restricted to specific repos and permissions
+    #   - Expires in 1 hour
+    #   - Has a rate limit of 5000 requests per hour
+    # -------------------------------------------------------------------------
+    - name: Get installation token
+      id: get-token
+      shell: bash
+      run: |
+        INSTALL_ID="${{ steps.find-install.outputs.installation-id }}"
+
+        # Build the request body for token scoping
+        BODY="{}"
+
+        # Scope to specific repositories if requested
+        if [ -n "${{ inputs.repositories }}" ]; then
+          REPOS_JSON=$(echo '${{ inputs.repositories }}' | tr ',' '\n' | jq -R . | jq -s '.')
+          BODY=$(echo "$BODY" | jq --argjson repos "$REPOS_JSON" '. + {repositories: $repos}')
+        fi
+
+        # Scope to specific permissions if requested
+        if [ -n '${{ inputs.permissions }}' ] && [ '${{ inputs.permissions }}' != '' ]; then
+          PERMS='${{ inputs.permissions }}'
+          BODY=$(echo "$BODY" | jq --argjson perms "$PERMS" '. + {permissions: $perms}')
+        fi
+
+        # Request the installation token
+        RESPONSE=$(curl -sf \
+          -X POST \
+          -H "Authorization: Bearer ${{ steps.jwt.outputs.jwt }}" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/app/installations/${INSTALL_ID}/access_tokens" \
+          -d "$BODY")
+
+        TOKEN=$(echo "$RESPONSE" | jq -r '.token')
+        EXPIRES_AT=$(echo "$RESPONSE" | jq -r '.expires_at')
+
+        if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+          echo "::error::Failed to generate installation token"
+          echo "::error::Response: $RESPONSE"
+          exit 1
+        fi
+
+        # Mask the token in logs
+        echo "::add-mask::${TOKEN}"
+
+        echo "token=${TOKEN}" >> "$GITHUB_OUTPUT"
+        echo "expires-at=${EXPIRES_AT}" >> "$GITHUB_OUTPUT"
+        echo "installation-id=${INSTALL_ID}" >> "$GITHUB_OUTPUT"
+
+        echo "Installation token generated (expires: ${EXPIRES_AT})"
+
+    - name: Token summary
+      shell: bash
+      run: |
+        echo "### GitHub App Token Generated" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
+        echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+        echo "| **App ID** | ${{ inputs.app-id }} |" >> "$GITHUB_STEP_SUMMARY"
+        echo "| **Installation** | ${{ steps.get-token.outputs.installation-id }} |" >> "$GITHUB_STEP_SUMMARY"
+        echo "| **Expires** | ${{ steps.get-token.outputs.expires-at }} |" >> "$GITHUB_STEP_SUMMARY"
+        echo "| **Scoped repos** | ${{ inputs.repositories || 'All installed' }} |" >> "$GITHUB_STEP_SUMMARY"
+        echo "| **Custom perms** | ${{ inputs.permissions || 'All granted' }} |" >> "$GITHUB_STEP_SUMMARY"
